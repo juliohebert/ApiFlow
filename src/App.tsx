@@ -5,8 +5,18 @@
 import { useState, useEffect } from 'react';
 import { Terminal, History, Folder, Layers, Settings, Plus, Search, Bell, HelpCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 
+interface OpenAPIEndpoint {
+  path: string;
+  method: string;
+  summary?: string;
+  description?: string;
+  parameters?: any[];
+  requestBody?: any;
+  security?: any[];
+}
+
 export default function App() {
-  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'builder' | 'environments' | 'saved'>('dashboard');
+  const [activeScreen, setActiveScreen] = useState<'dashboard' | 'builder' | 'environments' | 'saved' | 'swagger'>('swagger');
   const [curlInput, setCurlInput] = useState('');
   const [method, setMethod] = useState('GET');
   const [url, setUrl] = useState('');
@@ -23,6 +33,14 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [savedRequests, setSavedRequests] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  
+  // Estados para Swagger/OpenAPI
+  const [swaggerUrl, setSwaggerUrl] = useState('');
+  const [swaggerSpec, setSwaggerSpec] = useState<any>(null);
+  const [swaggerEndpoints, setSwaggerEndpoints] = useState<OpenAPIEndpoint[]>([]);
+  const [swaggerBaseUrl, setSwaggerBaseUrl] = useState('');
+  const [isLoadingSwagger, setIsLoadingSwagger] = useState(false);
+  const [selectedEndpoint, setSelectedEndpoint] = useState<OpenAPIEndpoint | null>(null);
 
   const handleSaveRequest = () => {
     const newRequest = {
@@ -43,6 +61,148 @@ export default function App() {
 
   const [filteredData, setFilteredData] = useState<any[]>([]);
   const [viewMode, setViewMode] = useState<'json' | 'table'>('json');
+
+  // Parsear especificação OpenAPI/Swagger
+  const parseOpenAPISpec = (spec: any) => {
+    const endpoints: OpenAPIEndpoint[] = [];
+    
+    // Determinar a base URL
+    let baseUrl = '';
+    if (spec.servers && spec.servers.length > 0) {
+      baseUrl = spec.servers[0].url;
+    } else if (spec.host) {
+      // Prioriza HTTPS se disponível nos schemes
+      let scheme = 'https';
+      if (spec.schemes && Array.isArray(spec.schemes)) {
+        scheme = spec.schemes.includes('https') ? 'https' : spec.schemes[0];
+      }
+      baseUrl = `${scheme}://${spec.host}${spec.basePath || ''}`;
+    }
+    
+    // Se ainda não tem protocolo, tenta usar o da URL do Swagger
+    if (baseUrl && !baseUrl.startsWith('http')) {
+      const swaggerProtocol = swaggerUrl.startsWith('https') ? 'https' : 'http';
+      baseUrl = `${swaggerProtocol}://${baseUrl}`;
+    }
+    
+    setSwaggerBaseUrl(baseUrl);
+    
+    // Extrair endpoints
+    const paths = spec.paths || {};
+    Object.keys(paths).forEach(path => {
+      const pathItem = paths[path];
+      ['get', 'post', 'put', 'delete', 'patch'].forEach(method => {
+        if (pathItem[method]) {
+          const operation = pathItem[method];
+          endpoints.push({
+            path,
+            method: method.toUpperCase(),
+            summary: operation.summary || '',
+            description: operation.description || '',
+            parameters: operation.parameters || [],
+            requestBody: operation.requestBody,
+            security: operation.security || spec.security || [],
+          });
+        }
+      });
+    });
+    
+    setSwaggerEndpoints(endpoints);
+    return endpoints;
+  };
+
+  // Importar Swagger
+  const handleSwaggerImport = async () => {
+    if (!swaggerUrl.trim()) {
+      alert('Por favor, insira a URL do Swagger');
+      return;
+    }
+    
+    setIsLoadingSwagger(true);
+    try {
+      const res = await fetch('/api/fetch-swagger', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: swaggerUrl }),
+      });
+      
+      const result = await res.json();
+      
+      if (result.success) {
+        setSwaggerSpec(result.data);
+        const endpoints = parseOpenAPISpec(result.data);
+        alert(`✅ Swagger importado com sucesso! ${endpoints.length} endpoints encontrados.`);
+      } else {
+        alert(`❌ Erro: ${result.error}`);
+      }
+    } catch (error) {
+      alert(`❌ Erro ao importar Swagger: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setIsLoadingSwagger(false);
+    }
+  };
+
+  // Aplicar endpoint selecionado ao formulário
+  const applyEndpoint = (endpoint: OpenAPIEndpoint) => {
+    setSelectedEndpoint(endpoint);
+    setMethod(endpoint.method);
+    
+    // Construir URL completa (remove barras duplicadas)
+    const baseUrl = swaggerBaseUrl.replace(/\/$/, ''); // Remove barra no final da base URL
+    const path = endpoint.path.startsWith('/') ? endpoint.path : '/' + endpoint.path;
+    let fullUrl = baseUrl + path;
+    
+    // Se tem parâmetros de path, substituir
+    const pathParams = endpoint.parameters?.filter(p => p.in === 'path') || [];
+    pathParams.forEach(param => {
+      fullUrl = fullUrl.replace(`{${param.name}}`, `{${param.name}}`);
+    });
+    
+    setUrl(fullUrl);
+    setRequestName(endpoint.summary || `${endpoint.method} ${endpoint.path}`);
+    
+    // Se tem requestBody, gerar exemplo
+    if (endpoint.requestBody) {
+      const content = endpoint.requestBody.content;
+      if (content && content['application/json']) {
+        const schema = content['application/json'].schema;
+        const example = generateExampleFromSchema(schema);
+        setBody(JSON.stringify(example, null, 2));
+      }
+    } else {
+      setBody('');
+    }
+  };
+
+  // Gerar exemplo a partir de schema
+  const generateExampleFromSchema = (schema: any): any => {
+    if (!schema) return {};
+    
+    if (schema.example) return schema.example;
+    
+    if (schema.properties) {
+      const example: any = {};
+      Object.keys(schema.properties).forEach(key => {
+        const prop = schema.properties[key];
+        if (prop.example !== undefined) {
+          example[key] = prop.example;
+        } else if (prop.type === 'string') {
+          example[key] = prop.default || 'string';
+        } else if (prop.type === 'number' || prop.type === 'integer') {
+          example[key] = prop.default || 0;
+        } else if (prop.type === 'boolean') {
+          example[key] = prop.default || false;
+        } else if (prop.type === 'array') {
+          example[key] = [];
+        } else if (prop.type === 'object') {
+          example[key] = prop.properties ? generateExampleFromSchema(prop) : {};
+        }
+      });
+      return example;
+    }
+    
+    return {};
+  };
 
   useEffect(() => {
     if (responseData) {
@@ -157,10 +317,12 @@ export default function App() {
             </button>
             <nav className="flex-1 space-y-1 px-4">
               {[
+                { id: 'swagger', name: 'Importar Swagger', icon: Layers },
+                { id: 'builder', name: 'Nova Requisição', icon: Plus },
+                { id: 'saved', name: 'Requisições Salvas', icon: History },
                 { id: 'dashboard', name: 'Área de Trabalho', icon: Terminal },
                 { id: 'history', name: 'Histórico', icon: History },
                 { id: 'collections', name: 'Coleções', icon: Folder },
-                { id: 'saved', name: 'Requisições Salvas', icon: History },
                 { id: 'environments', name: 'Ambientes', icon: Layers },
                 { id: 'settings', name: 'Configurações', icon: Settings },
               ].map((item) => (
@@ -196,6 +358,94 @@ export default function App() {
         <div className="flex-1 p-8">
           <div className="mb-4 text-xs text-gray-500">Estado atual: {activeScreen}</div>
           {activeScreen === 'dashboard' && <div className="p-4 bg-[#131b2e] rounded">Conteúdo do Painel</div>}
+          
+          {/* Tela de Importação Swagger */}
+          {activeScreen === 'swagger' && (
+            <div className="p-6 bg-[#131b2e] rounded border border-[#7bd0ff]">
+              <h2 className="text-2xl font-bold mb-2 text-[#7bd0ff]">🚀 Importar API via Swagger/OpenAPI</h2>
+              <p className="text-sm text-gray-400 mb-6">Cole a URL do Swagger UI da sua API e importe todos os endpoints automaticamente!</p>
+              
+              {/* Importação Swagger */}
+              <div className="mb-6 p-6 bg-[#0b1326] rounded border-2 border-[#7bd0ff] shadow-lg">
+                <h3 className="text-base font-bold text-[#7bd0ff] mb-4 flex items-center gap-2">
+                  <Layers size={20} />
+                  URL do Swagger UI
+                </h3>
+                <div className="flex gap-3">
+                  <input 
+                    className="flex-1 bg-[#131b2e] border-2 border-[#7bd0ff]/30 rounded-lg p-3 text-sm font-mono focus:border-[#7bd0ff] focus:outline-none" 
+                    placeholder="Ex: https://api.quark.tec.br/clinic/ext/swagger-ui.html#/"
+                    value={swaggerUrl}
+                    onChange={(e) => setSwaggerUrl(e.target.value)}
+                  />
+                  <button 
+                    onClick={handleSwaggerImport}
+                    disabled={isLoadingSwagger}
+                    className="bg-gradient-to-r from-[#7bd0ff] to-[#008abb] text-[#001e2c] px-8 py-3 rounded-lg font-bold text-sm disabled:opacity-50 hover:shadow-xl transition-all"
+                  >
+                    {isLoadingSwagger ? '⏳ Carregando...' : '✨ Importar API'}
+                  </button>
+                </div>
+                
+                {/* Lista de endpoints */}
+                {swaggerEndpoints.length > 0 && (
+                  <div className="mt-6">
+                    <div className="flex items-center justify-between mb-4">
+                      <div className="text-sm font-bold text-[#7bd0ff]">
+                        ✅ {swaggerEndpoints.length} endpoints encontrados
+                      </div>
+                      <div className="text-xs text-gray-400 font-mono">
+                        Base URL: {swaggerBaseUrl}
+                      </div>
+                    </div>
+                    <div className="bg-[#131b2e] rounded-lg p-4 border border-[#7bd0ff]/20">
+                      <div className="text-xs text-gray-400 mb-3">Clique em um endpoint para usar:</div>
+                      <div className="max-h-96 overflow-y-auto space-y-2">
+                        {swaggerEndpoints.map((endpoint, idx) => (
+                          <div 
+                            key={idx}
+                            onClick={() => {
+                              applyEndpoint(endpoint);
+                              setActiveScreen('builder');
+                            }}
+                            className={`p-3 rounded-lg cursor-pointer flex items-center gap-3 transition-all ${
+                              selectedEndpoint === endpoint 
+                                ? 'bg-[#222a3d] border-2 border-[#7bd0ff] shadow-md' 
+                                : 'bg-[#0b1326] border border-[#131b2e] hover:bg-[#222a3d] hover:border-[#7bd0ff]/50'
+                            }`}
+                          >
+                            <span className={`px-3 py-1 rounded-md text-xs font-bold min-w-[70px] text-center ${
+                              endpoint.method === 'GET' ? 'bg-green-900/50 text-green-300 border border-green-600' :
+                              endpoint.method === 'POST' ? 'bg-blue-900/50 text-blue-300 border border-blue-600' :
+                              endpoint.method === 'PUT' ? 'bg-yellow-900/50 text-yellow-300 border border-yellow-600' :
+                              endpoint.method === 'DELETE' ? 'bg-red-900/50 text-red-300 border border-red-600' :
+                              'bg-gray-900/50 text-gray-300 border border-gray-600'
+                            }`}>
+                              {endpoint.method}
+                            </span>
+                            <span className="text-sm font-mono flex-1 text-[#7bd0ff]">{endpoint.path}</span>
+                            <span className="text-xs text-gray-400 max-w-xs truncate">{endpoint.summary}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+              
+              <div className="mt-6 p-4 bg-[#0b1326] rounded border border-gray-700">
+                <h4 className="text-sm font-bold mb-2">💡 Como funciona:</h4>
+                <ul className="text-xs text-gray-400 space-y-1 list-disc list-inside">
+                  <li>Cole a URL do Swagger UI da sua API</li>
+                  <li>O sistema busca automaticamente a especificação OpenAPI</li>
+                  <li>Todos os endpoints são listados com seus métodos e descrições</li>
+                  <li>Clique em um endpoint para carregar automaticamente no construtor</li>
+                  <li>Faça requisições sem precisar configurar manualmente!</li>
+                </ul>
+              </div>
+            </div>
+          )}
+          
           {activeScreen === 'saved' && (
             <div className="p-6 bg-[#131b2e] rounded border border-[#7bd0ff]">
               <h2 className="text-lg font-bold text-[#7bd0ff] mb-4">Requisições Salvas</h2>
@@ -238,6 +488,61 @@ export default function App() {
           {activeScreen === 'builder' && (
             <div className="p-6 bg-[#131b2e] rounded border border-[#7bd0ff]">
               <h2 className="text-lg font-bold mb-4">Construtor de Requisições</h2>
+              
+              {/* Importação Swagger */}
+              <div className="mb-6 p-4 bg-[#0b1326] rounded border border-[#7bd0ff]/40">
+                <h3 className="text-sm font-bold text-[#7bd0ff] mb-3 flex items-center gap-2">
+                  <Layers size={16} />
+                  Importar API via Swagger/OpenAPI
+                </h3>
+                <div className="flex gap-2">
+                  <input 
+                    className="flex-1 bg-[#131b2e] border border-[#7bd0ff]/20 rounded p-2 text-sm" 
+                    placeholder="Cole a URL do Swagger UI (ex: https://api.exemplo.com/swagger-ui.html)"
+                    value={swaggerUrl}
+                    onChange={(e) => setSwaggerUrl(e.target.value)}
+                  />
+                  <button 
+                    onClick={handleSwaggerImport}
+                    disabled={isLoadingSwagger}
+                    className="bg-gradient-to-r from-[#7bd0ff] to-[#008abb] text-[#001e2c] px-4 py-2 rounded font-bold text-sm disabled:opacity-50"
+                  >
+                    {isLoadingSwagger ? 'Carregando...' : 'Importar'}
+                  </button>
+                </div>
+                
+                {/* Lista de endpoints */}
+                {swaggerEndpoints.length > 0 && (
+                  <div className="mt-4">
+                    <div className="text-xs text-gray-400 mb-2">
+                      {swaggerEndpoints.length} endpoints encontrados - Base URL: {swaggerBaseUrl}
+                    </div>
+                    <div className="max-h-60 overflow-y-auto space-y-1">
+                      {swaggerEndpoints.map((endpoint, idx) => (
+                        <div 
+                          key={idx}
+                          onClick={() => applyEndpoint(endpoint)}
+                          className={`p-2 rounded cursor-pointer flex items-center gap-2 hover:bg-[#222a3d] ${
+                            selectedEndpoint === endpoint ? 'bg-[#222a3d] border border-[#7bd0ff]/40' : 'bg-[#131b2e]'
+                          }`}
+                        >
+                          <span className={`px-2 py-0.5 rounded text-xs font-bold ${
+                            endpoint.method === 'GET' ? 'bg-green-900/40 text-green-400' :
+                            endpoint.method === 'POST' ? 'bg-blue-900/40 text-blue-400' :
+                            endpoint.method === 'PUT' ? 'bg-yellow-900/40 text-yellow-400' :
+                            endpoint.method === 'DELETE' ? 'bg-red-900/40 text-red-400' :
+                            'bg-gray-900/40 text-gray-400'
+                          }`}>
+                            {endpoint.method}
+                          </span>
+                          <span className="text-xs flex-1">{endpoint.path}</span>
+                          <span className="text-xs text-gray-500">{endpoint.summary}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
               
               <div className="mb-4">
                 <textarea 

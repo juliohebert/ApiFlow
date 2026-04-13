@@ -40,6 +40,53 @@ async function startServer() {
     }
   });
 
+  // Swagger/OpenAPI fetch route
+  app.post("/api/fetch-swagger", async (req, res) => {
+    const { url } = req.body;
+    console.log('Fetching Swagger from:', url);
+    
+    try {
+      // Tenta várias URLs possíveis de especificação OpenAPI
+      const possiblePaths = [
+        '/v2/api-docs',
+        '/v3/api-docs',
+        '/swagger.json',
+        '/api-docs',
+        '/openapi.json',
+        '/swagger/v1/swagger.json',
+      ];
+      
+      // Extrai a base URL do Swagger UI
+      let baseUrl = url.replace(/\/swagger-ui.*/, '');
+      
+      for (const path of possiblePaths) {
+        try {
+          const testUrl = baseUrl + path;
+          console.log('Tentando:', testUrl);
+          const response = await fetch(testUrl);
+          if (response.ok) {
+            const data = await response.json();
+            console.log('Swagger encontrado em:', testUrl);
+            return res.json({ success: true, data, url: testUrl });
+          }
+        } catch (e) {
+          // Continua tentando outras URLs
+        }
+      }
+      
+      res.status(404).json({ 
+        success: false, 
+        error: 'Não foi possível encontrar a especificação OpenAPI/Swagger. Tente fornecer a URL direta do JSON.' 
+      });
+    } catch (error) {
+      console.error('Swagger Fetch Error:', error);
+      res.status(500).json({ 
+        success: false, 
+        error: error instanceof Error ? error.message : String(error) 
+      });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
