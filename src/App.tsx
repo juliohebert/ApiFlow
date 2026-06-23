@@ -26,6 +26,7 @@ type ResponseMeta = {
   error?: string;
 };
 
+type QueryParam = { key: string; value: string };
 type EnvVariable = { id: number; name: string; value: string };
 type Environment = { id: string; name: string; variables: EnvVariable[] };
 
@@ -52,6 +53,7 @@ type HistoryEntry = {
     apiKeyValue: string;
     apiKeyLocation: string;
     pages: string;
+    queryParams?: QueryParam[];
     body: string;
     customHeaders: { key: string; value: string }[];
   };
@@ -382,6 +384,7 @@ export default function App() {
   
   // Headers customizáveis
   const [customHeaders, setCustomHeaders] = useState<{key: string, value: string}[]>([]);
+  const [queryParams, setQueryParams] = useState<QueryParam[]>([]);
   
   // Geração de código
   const [showCodeModal, setShowCodeModal] = useState(false);
@@ -481,6 +484,7 @@ export default function App() {
     setBody('');
     setRequestName('');
     setCustomHeaders([]);
+    setQueryParams([]);
     setSelectedEndpoint(null);
     setRequestConfigTab('auth');
     setCurlImportMessage('');
@@ -508,6 +512,7 @@ export default function App() {
       apiKeyValue,
       apiKeyLocation,
       pages,
+      queryParams: [...queryParams],
       body,
       lastExecutedAt: null as string | null,
       collectionId: null as string | null,
@@ -610,6 +615,33 @@ export default function App() {
   };
 
   // Função para gerar código
+  const addQueryParam = () => {
+    setQueryParams([...queryParams, { key: '', value: '' }]);
+  };
+
+  const removeQueryParam = (index: number) => {
+    setQueryParams(queryParams.filter((_: QueryParam, i: number) => i !== index));
+  };
+
+  const updateQueryParam = (index: number, field: 'key' | 'value', value: string) => {
+    const updated = [...queryParams];
+    updated[index][field] = value;
+    setQueryParams(updated);
+  };
+
+  const applyQueryParamsToUrl = (rawUrl: string) => {
+    try {
+      const requestUrl = new URL(rawUrl);
+      queryParams.forEach((param) => {
+        const key = applyEnvVars(param.key).trim();
+        if (key) requestUrl.searchParams.set(key, applyEnvVars(param.value));
+      });
+      return requestUrl.toString();
+    } catch {
+      return rawUrl;
+    }
+  };
+
   const getAuthHeaders = () => {
     const headers: Record<string, string> = {};
 
@@ -743,6 +775,7 @@ export default function App() {
     setApiKeyValue(snap.apiKeyValue);
     setApiKeyLocation(snap.apiKeyLocation as ApiKeyLocation);
     setPages(snap.pages);
+    setQueryParams(snap.queryParams || []);
     setBody(snap.body);
     setCustomHeaders(snap.customHeaders);
     setLoadedRequestId(null);
@@ -750,7 +783,7 @@ export default function App() {
   };
 
   const generateCode = () => {
-    const requestUrl = applyAuthToUrl(url);
+    const requestUrl = applyAuthToUrl(applyQueryParamsToUrl(url));
     const headers: any = {
       'Content-Type': 'application/json',
       ...getRequestHeaders(),
@@ -951,6 +984,7 @@ print(response.json())`;
     
     setUrl(fullUrl);
     setRequestName(endpoint.summary || `${endpoint.method} ${endpoint.path}`);
+    setQueryParams((endpoint.parameters?.filter(p => p.in === 'query') || []).map(param => ({ key: param.name || '', value: '' })));
     
     // Se tem requestBody, gerar exemplo
     if (endpoint.requestBody) {
@@ -1018,6 +1052,7 @@ print(response.json())`;
 
     const parsedCurl = parseCurlCommand(curlInput);
     const nextHeaders: { key: string; value: string }[] = [];
+    let nextQueryParams: QueryParam[] = [];
     let nextAuthType: AuthType = 'none';
     let nextAuthToken = '';
     let nextXChaveKey = '';
@@ -1131,19 +1166,24 @@ print(response.json())`;
     setMethod(parsedCurl.method || 'GET');
 
     if (parsedCurl.url) {
-      setUrl(parsedCurl.url);
+      let nextUrl = parsedCurl.url;
       try {
         const importedUrl = new URL(parsedCurl.url);
         const pageParam = importedUrl.searchParams.get('page');
         if (pageParam) setPages(pageParam);
+        nextQueryParams = Array.from(importedUrl.searchParams.entries()).map(([key, value]) => ({ key, value }));
+        importedUrl.search = '';
+        nextUrl = importedUrl.toString();
       } catch {
         const pageMatch = parsedCurl.url.match(/[?&]page=(\d+)/);
         if (pageMatch) setPages(pageMatch[1]);
       }
+      setUrl(nextUrl);
     }
 
     setBody(formattedBody);
     setCustomHeaders(nextHeaders);
+    setQueryParams(nextQueryParams);
     setAuthType(nextAuthType);
     setAuthToken(nextAuthToken);
     setXChaveKey(nextXChaveKey);
@@ -1202,7 +1242,8 @@ print(response.json())`;
       return;
     }
 
-    const unresolvedVar = resolvedUrl.match(/\{\{[\w-]+\}\}/);
+    const requestUrl = applyQueryParamsToUrl(resolvedUrl);
+    const unresolvedVar = requestUrl.match(/\{\{[\w-]+\}\}/);
     if (unresolvedVar) {
       const msg = `Variável de ambiente não definida: ${unresolvedVar[0]}. Configure-a em Ambientes ou substitua na URL.`;
       setResponse(`Erro: ${msg}`);
@@ -1237,7 +1278,7 @@ print(response.json())`;
     try {
       const results = [];
       for (const page of parsedPages.pages) {
-          const pageUrl = applyAuthToUrl(resolvedUrl.replace(/page=\d+/, `page=${page}`));
+          const pageUrl = applyAuthToUrl(requestUrl.replace(/page=\d+/, `page=${page}`));
           
           // Montar headers incluindo customizáveis (apenas se preenchidos)
           const requestHeaders: any = getRequestHeaders();
@@ -1281,13 +1322,13 @@ print(response.json())`;
       saveHistoryEntry({
         id: Date.now(),
         method,
-        url: resolvedUrl,
+        url: requestUrl,
         status: finalStatus,
         elapsedMs,
         executedAt: new Date().toISOString(),
         envName: activeEnvId ? (environments.find(e => e.id === activeEnvId)?.name ?? null) : null,
         success: true,
-        requestSnapshot: { method, url, authType, authToken, xChaveKey, xSecretKey, basicUsername, basicPassword, apiKeyName, apiKeyValue, apiKeyLocation, pages, body, customHeaders: [...customHeaders] },
+        requestSnapshot: { method, url, authType, authToken, xChaveKey, xSecretKey, basicUsername, basicPassword, apiKeyName, apiKeyValue, apiKeyLocation, pages, queryParams: [...queryParams], body, customHeaders: [...customHeaders] },
       });
       if (loadedRequestId !== null) {
         setSavedRequests(prev => {
@@ -1309,14 +1350,14 @@ print(response.json())`;
       saveHistoryEntry({
         id: Date.now(),
         method,
-        url: resolvedUrl,
+        url: requestUrl,
         status: null,
         elapsedMs,
         executedAt: new Date().toISOString(),
         envName: activeEnvId ? (environments.find(e => e.id === activeEnvId)?.name ?? null) : null,
         success: false,
         error: message,
-        requestSnapshot: { method, url, authType, authToken, xChaveKey, xSecretKey, basicUsername, basicPassword, apiKeyName, apiKeyValue, apiKeyLocation, pages, body, customHeaders: [...customHeaders] },
+        requestSnapshot: { method, url, authType, authToken, xChaveKey, xSecretKey, basicUsername, basicPassword, apiKeyName, apiKeyValue, apiKeyLocation, pages, queryParams: [...queryParams], body, customHeaders: [...customHeaders] },
       });
     } finally {
       setIsLoading(false);
@@ -1416,6 +1457,7 @@ print(response.json())`;
             setApiKeyValue(req.apiKeyValue || '');
             setApiKeyLocation(req.apiKeyLocation || 'header');
             setPages(req.pages || '1');
+            setQueryParams(req.queryParams || []);
             setBody(req.body || '');
             setRequestName(req.name);
             setLoadedRequestId(req.id);
@@ -1875,6 +1917,7 @@ print(response.json())`;
                             setApiKeyValue(req.apiKeyValue || '');
                             setApiKeyLocation(req.apiKeyLocation || 'header');
                             setPages(req.pages);
+                            setQueryParams(req.queryParams || []);
                             setBody(req.body);
                             setRequestName(req.name);
                             setLoadedRequestId(req.id);
@@ -2027,55 +2070,111 @@ print(response.json())`;
 
                 <div className="p-4 pt-3">
                   {requestConfigTab === 'params' && (
-                    <div className="grid grid-cols-1 gap-5 md:grid-cols-[220px_1fr]">
-                      <div className="flex flex-col gap-1.5">
-                        <label className="text-[10px] text-[#6B7280] uppercase font-bold">Paginas</label>
-                        <input
-                          className="h-11 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl px-3 text-sm text-[#111827] focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-[#2563EB]/10"
-                          name="apiflow_pages"
-                          autoComplete="off"
-                          autoCorrect="off"
-                          autoCapitalize="off"
-                          spellCheck={false}
-                          placeholder="1 ou 1-3"
-                          value={pages}
-                          onChange={(e) => setPages(e.target.value)}
-                        />
-                        <p className="text-[11px] leading-4 text-[#6B7280]">
-                          Use 1, 1,2,3 ou 1-3. A URL precisa ter o parametro page= para paginar; sem ele, a mesma URL sera chamada novamente.
-                        </p>
+                    <div className="space-y-5">
+                      <div className="space-y-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <label className="text-[10px] text-[#6B7280] uppercase font-bold">Query Params</label>
+                          <button
+                            type="button"
+                            onClick={addQueryParam}
+                            className="h-8 bg-[#EFF6FF] text-[#2563EB] px-3 rounded-lg text-xs font-bold border border-[#BFDBFE] flex items-center gap-1.5 hover:bg-[#DBEAFE] transition-colors"
+                          >
+                            <Plus size={13} /> Param
+                          </button>
+                        </div>
+                        <div className="space-y-2">
+                          {queryParams.map((param, index) => (
+                            <div key={index} className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_1fr_auto] md:items-center">
+                              <input
+                                className="h-11 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl px-3 text-sm text-[#111827] focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-[#2563EB]/10"
+                                name={`apiflow_query_param_key_${index}`}
+                                autoComplete="off"
+                                autoCorrect="off"
+                                autoCapitalize="off"
+                                spellCheck={false}
+                                placeholder="Nome"
+                                value={param.key}
+                                onChange={(e) => updateQueryParam(index, 'key', e.target.value)}
+                              />
+                              <input
+                                className="h-11 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl px-3 text-sm text-[#111827] focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-[#2563EB]/10"
+                                name={`apiflow_query_param_value_${index}`}
+                                autoComplete="off"
+                                autoCorrect="off"
+                                autoCapitalize="off"
+                                spellCheck={false}
+                                placeholder="Valor"
+                                value={param.value}
+                                onChange={(e) => updateQueryParam(index, 'value', e.target.value)}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => removeQueryParam(index)}
+                                className="h-11 w-11 flex items-center justify-center rounded-xl bg-white border border-[#E5E7EB] text-[#9CA3AF] hover:bg-red-50 hover:text-red-500 hover:border-red-200 transition-colors"
+                                aria-label="Remover query param"
+                              >
+                                <Trash2 size={14} />
+                              </button>
+                            </div>
+                          ))}
+                          {queryParams.length === 0 && (
+                            <div className="bg-[#F9FAFB] border border-dashed border-[#D1D5DB] rounded-xl py-8 text-center">
+                              <p className="text-xs font-semibold text-[#374151]">Nenhum query param adicionado</p>
+                              <p className="text-[11px] text-[#9CA3AF] mt-0.5">Clique em "+ Param" para adicionar.</p>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <div className="flex flex-col gap-1.5">
-                        <label className="text-[10px] text-[#6B7280] uppercase font-bold">Importar cURL</label>
-                        <div className="flex flex-col gap-3 md:flex-row md:items-start">
-                          <textarea
-                            className="min-h-24 flex-1 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl p-3 text-xs font-mono text-[#111827] placeholder:text-[#6B7280] focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-[#2563EB]/10"
-                            name="apiflow_curl_import"
+                      <div className="grid grid-cols-1 gap-5 md:grid-cols-[220px_1fr]">
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-[10px] text-[#6B7280] uppercase font-bold">Paginas</label>
+                          <input
+                            className="h-11 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl px-3 text-sm text-[#111827] focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-[#2563EB]/10"
+                            name="apiflow_pages"
                             autoComplete="off"
                             autoCorrect="off"
                             autoCapitalize="off"
                             spellCheck={false}
-                            placeholder="Cole um comando cURL para preencher metodo, URL e autenticacao"
-                            value={curlInput}
-                            onChange={(e) => {
-                              setCurlInput(e.target.value);
-                              setCurlImportMessage('');
-                            }}
+                            placeholder="1 ou 1-3"
+                            value={pages}
+                            onChange={(e) => setPages(e.target.value)}
                           />
-                          <button
-                            type="button"
-                            onClick={handleCurlImport}
-                            className="h-9 shrink-0 self-start bg-[#EFF6FF] text-[#2563EB] px-4 rounded-lg text-xs font-bold border border-[#BFDBFE] hover:bg-[#DBEAFE] transition-colors"
-                          >
-                            Importar
-                          </button>
+                          <p className="text-[11px] leading-4 text-[#6B7280]">
+                            Use 1, 1,2,3 ou 1-3. A URL precisa ter o parametro page= para paginar; sem ele, a mesma URL sera chamada novamente.
+                          </p>
                         </div>
-                        {curlImportMessage && (
-                          <div className="flex items-start gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs font-medium text-green-700">
-                            <Check size={14} className="mt-0.5 shrink-0" />
-                            <span className="break-all">{curlImportMessage}</span>
+                        <div className="flex flex-col gap-1.5">
+                          <label className="text-[10px] text-[#6B7280] uppercase font-bold">Importar cURL</label>
+                          <div className="flex flex-col gap-3 md:flex-row md:items-start">
+                            <textarea
+                              className="min-h-24 flex-1 bg-[#F9FAFB] border border-[#E5E7EB] rounded-xl p-3 text-xs font-mono text-[#111827] placeholder:text-[#6B7280] focus:border-[#2563EB] focus:outline-none focus:ring-2 focus:ring-[#2563EB]/10"
+                              name="apiflow_curl_import"
+                              autoComplete="off"
+                              autoCorrect="off"
+                              autoCapitalize="off"
+                              spellCheck={false}
+                              placeholder="Cole um comando cURL para preencher metodo, URL e autenticacao"
+                              value={curlInput}
+                              onChange={(e) => {
+                                setCurlInput(e.target.value);
+                                setCurlImportMessage('');
+                              }}
+                            />
+                            <button
+                              type="button"
+                              onClick={handleCurlImport}
+                              className="h-9 shrink-0 self-start bg-[#EFF6FF] text-[#2563EB] px-4 rounded-lg text-xs font-bold border border-[#BFDBFE] hover:bg-[#DBEAFE] transition-colors"
+                            >
+                              Importar
+                            </button>
                           </div>
-                        )}
+                          {curlImportMessage && (
+                            <div className="flex items-start gap-2 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-xs font-medium text-green-700">
+                              <Check size={14} className="mt-0.5 shrink-0" />
+                              <span className="break-all">{curlImportMessage}</span>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     </div>
                   )}
