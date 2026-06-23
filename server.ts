@@ -4,36 +4,55 @@ import path from "path";
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT) || 3000;
+  const allowedMethods = new Set(["GET", "POST", "PUT", "PATCH", "DELETE"]);
 
   app.use(express.json());
 
   // Proxy route
   app.post("/api/proxy", async (req, res) => {
     const { url, method, headers, body } = req.body;
-    console.log('Proxying request:', { url, method, headers, body });
     try {
+      const targetUrl = new URL(url);
+      if (!["http:", "https:"].includes(targetUrl.protocol)) {
+        return res.status(400).json({ error: "URL invalida. Use http ou https." });
+      }
+
+      const requestMethod = String(method || "GET").toUpperCase();
+      if (!allowedMethods.has(requestMethod)) {
+        return res.status(400).json({ error: "Metodo HTTP invalido." });
+      }
+
       const fetchOptions: any = {
-        method,
+        method: requestMethod,
         headers: {
           ...headers,
-          "Content-Type": "application/json",
         },
       };
-      if (body && method !== 'GET') {
+      
+      // Adiciona Content-Type e body apenas se houver body
+      if (body !== undefined && requestMethod !== 'GET') {
+        fetchOptions.headers["Content-Type"] = "application/json";
         fetchOptions.body = JSON.stringify(body);
+      } else if (body === null && (requestMethod === 'POST' || requestMethod === 'PUT' || requestMethod === 'PATCH')) {
+        // Se for POST/PUT/PATCH sem body, envia objeto vazio
+        fetchOptions.headers["Content-Type"] = "application/json";
+        fetchOptions.body = JSON.stringify({});
       }
-      console.log('Fetching with options:', fetchOptions);
-      const response = await fetch(url, fetchOptions);
+      
+      console.log('Proxying request:', { url: targetUrl.toString(), method: requestMethod });
+      const response = await fetch(targetUrl, fetchOptions);
       const data = await response.text();
-      console.log('API Response:', { status: response.status, data });
+      console.log('API response:', { status: response.status });
       let parsedData;
       try {
         parsedData = JSON.parse(data);
       } catch {
         parsedData = { raw: data };
       }
-      res.json({ status: response.status, data: parsedData });
+      const responseHeaders: Record<string, string> = {};
+      response.headers.forEach((value, key) => { responseHeaders[key] = value; });
+      res.json({ status: response.status, data: parsedData, headers: responseHeaders });
     } catch (error) {
       console.error('Proxy Error:', error);
       res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
@@ -47,6 +66,24 @@ async function startServer() {
     
     try {
       // Tenta várias URLs possíveis de especificação OpenAPI
+      const swaggerUrl = new URL(url);
+      if (!["http:", "https:"].includes(swaggerUrl.protocol)) {
+        return res.status(400).json({ success: false, error: "URL invalida. Use http ou https." });
+      }
+
+      const fetchSwaggerJson = async (testUrl: string) => {
+        const response = await fetch(testUrl);
+        if (!response.ok) return null;
+        const contentType = response.headers.get("content-type") || "";
+        if (!contentType.includes("json")) return null;
+        return response.json();
+      };
+
+      const directData = await fetchSwaggerJson(swaggerUrl.toString());
+      if (directData) {
+        return res.json({ success: true, data: directData, url: swaggerUrl.toString() });
+      }
+
       const possiblePaths = [
         '/v2/api-docs',
         '/v3/api-docs',
@@ -57,15 +94,14 @@ async function startServer() {
       ];
       
       // Extrai a base URL do Swagger UI
-      let baseUrl = url.replace(/\/swagger-ui.*/, '');
+      const baseUrl = swaggerUrl.toString().replace(/\/swagger-ui.*/, '').replace(/\/$/, '');
       
       for (const path of possiblePaths) {
         try {
           const testUrl = baseUrl + path;
           console.log('Tentando:', testUrl);
-          const response = await fetch(testUrl);
-          if (response.ok) {
-            const data = await response.json();
+          const data = await fetchSwaggerJson(testUrl);
+          if (data) {
             console.log('Swagger encontrado em:', testUrl);
             return res.json({ success: true, data, url: testUrl });
           }
